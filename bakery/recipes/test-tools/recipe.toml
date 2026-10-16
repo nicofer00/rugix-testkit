@@ -1,0 +1,2 @@
+description = "install tools that tests run on the system"
+dependencies = ["core/pkg-update"]

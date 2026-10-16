@@ -538,22 +538,26 @@ version = "0.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "fabric" },
+    { name = "paramiko" },
+    { name = "pytest" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
-    { name = "pytest" },
     { name = "ruff" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "fabric", specifier = ">=3.0" }]
+requires-dist = [
+    { name = "fabric", specifier = ">=3.0" },
+    { name = "paramiko", specifier = ">=3.0" },
+    { name = "pytest", specifier = ">=8.0" },
+]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy", specifier = ">=1.0" },
-    { name = "pytest", specifier = ">=7.0" },
     { name = "ruff", specifier = ">=0.4" },
 ]
 

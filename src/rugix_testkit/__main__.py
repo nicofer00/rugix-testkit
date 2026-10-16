@@ -75,7 +75,7 @@ def _cmd_ssh(args: argparse.Namespace) -> int:
                 print(result.stderr, end="", file=sys.stderr)
             return result.return_code
     else:
-        # Interactive SSH — hand off to ssh binary, clean up QEMU after.
+        # Interactive SSH: hand off to the ssh binary and clean up QEMU after.
         try:
             proc = subprocess.run(
                 [
@@ -86,7 +86,7 @@ def _cmd_ssh(args: argparse.Namespace) -> int:
                     "UserKnownHostsFile=/dev/null",
                     "-p",
                     str(vm._ssh_port),
-                    "root@localhost",
+                    "root@127.0.0.1",
                 ]
             )
             return proc.returncode

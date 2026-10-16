@@ -228,7 +228,7 @@ class QemuVM:
 
         net_str = cfg.net
         if "hostfwd=" not in net_str:
-            net_str += f",hostfwd=tcp::{ssh_port}-:22"
+            net_str += f",hostfwd=tcp:127.0.0.1:{ssh_port}-:22"
         cmd.extend(["-nic", net_str])
 
         cmd.extend(cfg.extra_args)

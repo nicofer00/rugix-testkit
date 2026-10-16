@@ -90,7 +90,7 @@ class TestBuildCmd:
         cmd = vm._build_cmd(ssh_port=5555, interactive=False)
         nic_idx = cmd.index("-nic")
         nic_val = cmd[nic_idx + 1]
-        assert "hostfwd=tcp::5555-:22" in nic_val
+        assert "hostfwd=tcp:127.0.0.1:5555-:22" in nic_val
 
     @patch("rugix_testkit.qemu.vm._kvm_available", return_value=False)
     def test_custom_net_with_hostfwd(self, _mock_kvm):

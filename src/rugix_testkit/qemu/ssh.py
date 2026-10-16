@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import shlex
+import socket
 import time
 from pathlib import Path
 
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def connect_ssh(
-    host: str = "localhost",
+    host: str = "127.0.0.1",
     port: int = 2222,
     user: str = "root",
     connect_timeout: float = 10,
@@ -37,11 +38,11 @@ def connect_ssh(
 
 
 def wait_for_ssh(
-    host: str = "localhost",
+    host: str = "127.0.0.1",
     port: int = 2222,
     user: str = "root",
     timeout: float = 300,
-    interval: float = 5,
+    interval: float = 1,
     private_key: Path | paramiko.PKey | None = None,
 ) -> fabric.Connection:
     """
@@ -51,33 +52,15 @@ def wait_for_ssh(
     """
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
-
-    # Suppress paramiko's ERROR-level transport logging during polling
-    # — failed attempts are expected and not actionable.
-    paramiko_logger = logging.getLogger("paramiko.transport")
-    original_level = paramiko_logger.level
-    paramiko_logger.setLevel(logging.CRITICAL)
-    try:
-        while time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        # Paramiko logs tracebacks for connections that never receive a
+        # banner, so we only connect once the server sends one.
+        if _has_ssh_banner(host, port):
             try:
-                conn = connect_ssh(
-                    host,
-                    port,
-                    user,
-                    connect_timeout=min(interval, 10),
-                    private_key=private_key,
-                )
-                paramiko_logger.setLevel(original_level)
-                return conn
+                return connect_ssh(host, port, user, private_key=private_key)
             except Exception as exc:
                 last_error = exc
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(interval, remaining))
-    finally:
-        paramiko_logger.setLevel(original_level)
-
+        time.sleep(interval)
     raise TimeoutError(
         f"SSH not available on {host}:{port} after {timeout}s: {last_error}"
     )
@@ -126,6 +109,17 @@ def run_json(
     result = run_cmd(conn, args, check=check, hide=True, **kwargs)
     data: JsonObject = json.loads(result.stdout)
     return data
+
+
+def _has_ssh_banner(host: str, port: int) -> bool:
+    prefix = b""
+    try:
+        with socket.create_connection((host, port), timeout=2) as sock:
+            while len(prefix) < 4 and (chunk := sock.recv(4 - len(prefix))):
+                prefix += chunk
+    except OSError:
+        return False
+    return prefix == b"SSH-"
 
 
 def _connect_auth_none(host: str, port: int, user: str) -> fabric.Connection:

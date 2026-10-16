@@ -36,6 +36,4 @@ class CmdError(Exception):
 
     def __init__(self, result: CmdResult) -> None:
         self.result = result
-        super().__init__(
-            f"Command {result.command!r} failed with exit code {result.return_code}"
-        )
+        super().__init__(f"command failed\n{result}")

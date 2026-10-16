@@ -77,17 +77,13 @@ class RugixCtrl:
     ) -> CmdResult:
         """Install an update bundle from *source*.
 
-        *source* is forwarded verbatim to ``rugix-ctrl`` — typically a
+        *source* is forwarded verbatim to ``rugix-ctrl``, typically a
         URL or a path on the VM. For a bundle that lives on the host,
         use :meth:`update_install_file`.
         """
         cmd = ["rugix-ctrl", "update", "install", "--reboot", reboot]
-        if insecure:
-            cmd.append("--insecure-skip-bundle-verification")
-        if root_cert is not None:
-            cmd += ["--root-cert", root_cert]
-        cmd.append(source)
-        return self.vm.run(cmd, hide=True, timeout=timeout, check=check)
+        cmd += _verification_args(insecure, root_cert)
+        return self.vm.run([*cmd, source], hide=True, timeout=timeout, check=check)
 
     def update_install_file(
         self,
@@ -115,6 +111,36 @@ class RugixCtrl:
             timeout=timeout,
         )
 
+    def install_and_reboot(
+        self,
+        source: str,
+        *,
+        insecure: bool = True,
+        root_cert: str | None = None,
+        timeout: float = 600,
+    ) -> None:
+        """Install an update with ``--reboot yes`` and wait for the reboot."""
+        cmd = ["rugix-ctrl", "update", "install", "--reboot", "yes"]
+        cmd += _verification_args(insecure, root_cert)
+        self.vm.run_disconnecting([*cmd, source], timeout=timeout)
+        self.vm.wait_for_reboot()
+
     def system_commit(self) -> CmdResult:
         """Commit the current system state."""
         return self.vm.run(["rugix-ctrl", "system", "commit"], hide=True)
+
+    def assert_boot(self, *, default: str, active: str) -> SystemInfo:
+        """Assert the default and active boot groups. Returns the system info."""
+        info = self.system_info()
+        assert (info.default_group, info.active_group) == (default, active), (
+            f"expected default/active group {default}/{active}, "
+            f"got {info.default_group}/{info.active_group}"
+        )
+        return info
+
+
+def _verification_args(insecure: bool, root_cert: str | None) -> list[str]:
+    args = ["--insecure-skip-bundle-verification"] if insecure else []
+    if root_cert is not None:
+        args += ["--root-cert", root_cert]
+    return args

@@ -1,0 +1,15 @@
+# Debian system for `generic-grub-efi` targets that the testkit's `vm` fixture
+# can log into via SSH. Tests can use `curl` on the system.
+parent = "core/debian-trixie"
+
+recipes = [
+    "core/debian-grub-setup",
+    "core/rugix-ctrl-daemon",
+    "core/ssh",
+    "network",
+    "test-tools",
+]
+
+# Install the Rugix Ctrl build mounted into the Bakery container.
+[parameters."core/rugix-ctrl"]
+version = "container"

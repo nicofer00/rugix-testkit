@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import fabric
+import paramiko
+from invoke.exceptions import CommandTimedOut, ThreadException
 
-from ..result import CmdResult
+from ..result import CmdError, CmdResult
 from ..types import JsonObject
 from .config import VMConfig
 from .ssh import run_cmd, wait_for_ssh
@@ -41,6 +43,7 @@ class VMHandle:
         self._private_key = private_key
         self._conn: fabric.Connection | None = None
         self._ssh_port: int | None = None
+        self._boot_id: str | None = None
         self._command_history: list[CmdResult] = []
         self._closed = False
 
@@ -91,6 +94,7 @@ class VMHandle:
                 timeout=boot_timeout,
                 private_key=private_key,
             )
+            handle._boot_id = _boot_id(handle._conn)
         except Exception:
             logger.error("Boot failed. Serial output:\n%s", handle._qemu.serial_output)
             handle._qemu.stop()
@@ -107,8 +111,10 @@ class VMHandle:
     def run(self, args: list[str], *, check: bool = True, **kwargs: Any) -> CmdResult:
         """Run a command on the VM over SSH."""
         assert self._conn is not None
-        result = run_cmd(self._conn, args, check=check, **kwargs)
+        result = run_cmd(self._conn, args, check=False, **kwargs)
         self._command_history.append(result)
+        if check and not result.ok:
+            raise CmdError(result)
         return result
 
     def run_json(self, args: list[str], **kwargs: Any) -> JsonObject:
@@ -132,36 +138,50 @@ class VMHandle:
 
     def reboot(self, timeout: float = 300) -> None:
         """Reboot the VM and wait for SSH to come back up."""
-        try:
-            self.run(["reboot"], check=False, hide=True)
-        except Exception:
-            pass
+        self.run_disconnecting(["reboot"])
         self.wait_for_reboot(timeout=timeout)
 
+    def run_disconnecting(self, args: list[str], **kwargs: Any) -> None:
+        """Run a command that may drop the SSH connection, e.g., by rebooting.
+
+        Fails if the command exits with a non-zero code before the connection
+        drops.
+        """
+        try:
+            result = self.run(args, check=False, **{"hide": True, **kwargs})
+        except _DISCONNECT_ERRORS:
+            return
+        # Paramiko reports -1 when the connection closes without an exit code.
+        if result.return_code not in (0, -1):
+            raise CmdError(result)
+
     def wait_for_reboot(self, timeout: float = 300) -> None:
-        """Wait for an in-progress reboot to complete and reconnect SSH."""
+        """Wait for an initiated reboot to complete and reconnect SSH.
+
+        The VM counts as rebooted once it reports a new kernel boot ID.
+        """
         assert self._ssh_port is not None and self._conn is not None
-
-        deadline = time.monotonic() + timeout
-        transport = self._conn.transport
-        if transport is not None:
-            while time.monotonic() < deadline:
-                if not transport.is_active():
-                    break
-                time.sleep(0.5)
-            else:
-                logger.warning("SSH transport never went down, reconnecting anyway.")
-
         self._conn.close()
-
-        time.sleep(10)
-
-        remaining = max(0, deadline - time.monotonic())
-        self._conn = wait_for_ssh(
-            port=self._ssh_port,
-            timeout=remaining or 30,
-            private_key=self._private_key,
-        )
+        deadline = time.monotonic() + timeout
+        while (remaining := deadline - time.monotonic()) > 0:
+            conn = wait_for_ssh(
+                port=self._ssh_port,
+                timeout=remaining,
+                private_key=self._private_key,
+            )
+            boot_id: str | None
+            try:
+                boot_id = _boot_id(conn)
+            except (*_DISCONNECT_ERRORS, CommandTimedOut):
+                # The shutting-down system may drop or stall the connection.
+                boot_id = self._boot_id
+            if boot_id != self._boot_id:
+                self._conn = conn
+                self._boot_id = boot_id
+                return
+            conn.close()
+            time.sleep(1)
+        raise TimeoutError(f"VM did not reboot within {timeout}s")
 
     def __enter__(self) -> VMHandle:
         return self
@@ -177,3 +197,12 @@ class VMHandle:
                 ResourceWarning,
                 stacklevel=1,
             )
+
+
+_DISCONNECT_ERRORS = (OSError, EOFError, paramiko.SSHException, ThreadException)
+"""Errors raised when an SSH connection drops during a command."""
+
+
+def _boot_id(conn: fabric.Connection) -> str:
+    path = "/proc/sys/kernel/random/boot_id"
+    return run_cmd(conn, ["cat", path], hide=True, timeout=10).stdout.strip()
