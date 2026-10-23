@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -108,6 +109,72 @@ def test_run_logged_layer_style_redraw(caplog: pytest.LogCaptureFixture) -> None
         "bakery: ------- Layer: current-layer -------",
         "bakery: done",
     ]
+
+
+def test_run_logged_flushes_soft_lines_on_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Soft status is still logged when the child exits non-zero."""
+    log = logging.getLogger("test_run_logged_fail_soft")
+    code = (
+        "import sys\n"
+        "sys.stdout.write('------- Layer: current-layer -------\\n')\n"
+        "sys.stdout.write('running\\n')\n"
+        "sys.stdout.write('\\x1b[1A\\x1b[2Kfailed step\\n')\n"
+        "sys.exit(3)\n"
+    )
+    with caplog.at_level(logging.DEBUG, logger="test_run_logged_fail_soft"):
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            run_logged(["python", "-c", code], logger=log, prefix="bakery: ")
+    assert exc_info.value.returncode == 3
+    assert "failed step" in exc_info.value.output
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "test_run_logged_fail_soft"
+    ]
+    assert "bakery: ------- Layer: current-layer -------" in messages
+    assert "bakery: failed step" in messages
+
+
+def test_run_logged_soft_overwrite_on_tty(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """On a TTY, soft updates use CSI clears; only the final line is logged."""
+
+    class TtyStderr:
+        def __init__(self) -> None:
+            self.buf = ""
+
+        def isatty(self) -> bool:
+            return True
+
+        def write(self, data: str) -> int:
+            self.buf += data
+            return len(data)
+
+        def flush(self) -> None:
+            return None
+
+    tty = TtyStderr()
+    monkeypatch.setattr(sys, "stderr", tty)
+    log = logging.getLogger("test_run_logged_tty_soft")
+    code = (
+        "import sys\n"
+        "sys.stdout.write('progress 10%')\n"
+        "sys.stdout.flush()\n"
+        "sys.stdout.write('\\rprogress 100%\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+    with caplog.at_level(logging.DEBUG, logger="test_run_logged_tty_soft"):
+        run_logged(["python", "-c", code], logger=log, prefix="bakery: ")
+    assert "\x1b[2K" in tty.buf
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "test_run_logged_tty_soft"
+    ]
+    assert messages == ["bakery: progress 100%"]
 
 
 def test_run_logged_streams_live_with_pty() -> None:

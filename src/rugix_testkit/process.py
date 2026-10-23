@@ -7,6 +7,7 @@ import os
 import pty
 import re
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TextIO
@@ -32,15 +33,16 @@ def run_logged(
     The child runs on a PTY so line-buffered tools still stream live. A virtual
     screen interprets ``\\r``, cursor-up, and erase sequences like a terminal:
 
-    - The latest line is always held briefly so a carriage-return progress
-      update can replace it.
-    - After the first in-place control (cursor-up / erase), a larger soft tail
-      is held so bakery-style redraws (for example, layer status blocks) update
-      in place instead of flooding the log with duplicates.
+    - Temporary (soft) lines are shown with in-place terminal updates when
+      stderr is a TTY, so progress / layer status can overwrite without
+      bloating the scrollback.
+    - Soft lines are promoted to permanent ``logger.debug`` records when they
+      scroll out of the soft window, and always flushed to the logger (and
+      optional log file) when the process exits—including on failure—so a
+      failed bake still leaves the last status visible in the log.
 
-    Held lines are flushed when they scroll out of the soft window, or when the
-    process exits. When *log_file* is set, the final cleaned lines are written
-    there. Raises ``CalledProcessError`` on a non-zero exit.
+    When *log_file* is set, the final cleaned lines are written there. Raises
+    ``CalledProcessError`` on a non-zero exit.
     """
     master, slave = pty.openpty()
     try:
@@ -71,9 +73,7 @@ def run_logged(
         os.close(master)
         process.wait()
 
-    output = "".join(
-        f"{line}\n" for line in screen.lines if line.rstrip("\r\n")
-    )
+    output = "".join(f"{line}\n" for line in screen.lines if line.rstrip("\r\n"))
     if process.returncode:
         raise subprocess.CalledProcessError(
             process.returncode,
@@ -108,6 +108,7 @@ class _Screen:
         self.max_row = 0
         self.max_cursor_up = 0
         self.interactive = False
+        self._soft_shown = 0
 
     def feed(self, text: str) -> None:
         while "\r\n" in text:
@@ -129,6 +130,7 @@ class _Screen:
                 continue
             else:
                 self._put(char)
+        self._publish_soft()
 
     def _feed_escape(self, text: str, i: int) -> int:
         if i + 1 >= len(text):
@@ -228,13 +230,51 @@ class _Screen:
     def _commit_upto(self) -> int:
         return max(0, self.max_row - self._soft())
 
+    def _soft_texts(self) -> list[str]:
+        texts: list[str] = []
+        for line in self.lines[self.emitted : max(self.max_row, self.row + 1)]:
+            text = line.rstrip("\r\n")
+            if text:
+                texts.append(text)
+        return texts
+
+    def _live_soft_enabled(self) -> bool:
+        return self.logger.isEnabledFor(logging.DEBUG) and sys.stderr.isatty()
+
+    def _clear_soft_terminal(self) -> None:
+        if self._soft_shown <= 0:
+            return
+        stream = sys.stderr
+        stream.write(f"\x1b[{self._soft_shown}A")
+        for _ in range(self._soft_shown):
+            stream.write("\x1b[2K\n")
+        stream.write(f"\x1b[{self._soft_shown}A")
+        stream.flush()
+        self._soft_shown = 0
+
+    def _publish_soft(self) -> None:
+        """Show soft lines with in-place updates (no permanent log records yet)."""
+        if not self._live_soft_enabled():
+            return
+        texts = self._soft_texts()
+        stream = sys.stderr
+        self._clear_soft_terminal()
+        for text in texts:
+            stream.write(f"\x1b[2K{self.prefix}{text}\n")
+        stream.flush()
+        self._soft_shown = len(texts)
+
     def _flush_stable(self) -> None:
         limit = self._commit_upto()
         while self.emitted < limit and self.emitted < len(self.lines):
+            self._clear_soft_terminal()
             self._emit_line(self.lines[self.emitted])
             self.emitted += 1
+            self._publish_soft()
 
     def flush_all(self) -> None:
+        """Permanently log every remaining line (success or failure)."""
+        self._clear_soft_terminal()
         while self.emitted < len(self.lines):
             self._emit_line(self.lines[self.emitted])
             self.emitted += 1

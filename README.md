@@ -119,10 +119,11 @@ is set. After each test, the plugin saves the serial output and command
 history of its VMs to `test-outputs/`.
 
 Use `--log-cli-level=DEBUG` to stream bakery stdout/stderr and VM serial
-output to the terminal while tests run. Bakery runs on a PTY and in-place
-TTY updates (carriage return, cursor-up, clear-line) are interpreted so
-layer status redraws replace the soft tail instead of duplicating lines.
-With `rugix_save_bake_log = true`, each bake also writes
+output to the terminal while tests run. Bakery runs on a PTY; in-place TTY
+updates (carriage return, cursor-up, clear-line) refresh a soft status tail
+on the terminal without bloating scrollback, then those lines are committed
+to the debug log when they stabilize or when the bake exits (including on
+failure). With `rugix_save_bake_log = true`, each bake also writes
 `test-outputs/bakery/<artifact>.log` (named from the bake artifact key, for
 example `image-test-efi-<hash>.log`).
 
