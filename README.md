@@ -38,6 +38,10 @@ dependencies = [
 [tool.pytest.ini_options]
 # System booted by the `vm` fixture.
 rugix_boot_system = "test-efi"
+# Optional: project private key for VM login (else a key is generated).
+# rugix_ssh_private_key = "keys/id_rsa"
+# Optional: set false when the image already bakes root_authorized_keys.
+# rugix_ssh_param_file = false
 # Keep each test module on one pytest-xdist worker.
 addopts = "--dist loadfile"
 ```
@@ -97,7 +101,9 @@ def test_update(
 | --- | --- |
 | `rugix_project` | Path of the Bakery project, configured by `rugix_project_dir`. |
 | `bakery` | Bakes images and bundles of the project. |
-| `bakery_parameters` | Recipe parameter overrides for all bakes. Override it to add parameters. |
+| `bakery_parameters` | Suite-wide recipe parameter overrides for `bakery`. Override to add parameters. |
+| `bakery_param_overrides` | Opt-in overrides for `bakery_with_overrides`. Default empty. |
+| `bakery_with_overrides` | Bakery builder that applies `bakery_param_overrides` (merged with `bakery_parameters`). |
 | `bundler` | Runs Rugix Bundler on the host. |
 | `bundle_url` | Converts a path in the project to a URL that VMs can download from. |
 | `boot_system` | System booted by `vm`. Override it in a module to boot another system. |
@@ -106,11 +112,54 @@ def test_update(
 | `start_qemu` | Starts a VM without SSH, for example, to check the serial console. |
 | `vm` | A VM running `boot_system`. |
 | `rugix` | Rugix Ctrl on `vm`. |
-| `ssh_key` | Private key that baked systems authorize for `root`. |
+| `ssh_key` | Private key used to log in as `root` (from `rugix_ssh_private_key` or generated). |
 
 Tests marked with `@pytest.mark.extended` only run when `RUGIX_TESTS_EXTENDED`
 is set. After each test, the plugin saves the serial output and command
 history of its VMs to `test-outputs/`.
+
+Use `--log-cli-level=DEBUG` to stream bakery stdout/stderr and VM serial
+output to the terminal while tests run. Bakery runs on a PTY. Carriage
+return updates overwrite the current progress line; cursor-up/clear sequences
+are stripped from the permanent transcript so bake steps are not deleted.
+With `rugix_save_bake_log = true`, each bake also writes
+`test-outputs/bakery/<artifact>.log` (named from the bake artifact key, for
+example `image-test-efi-<hash>.log`) for post-run inspection. The extended
+test `tests/test_bake_logs.py` performs a real bake and asserts on that log
+(`RUGIX_TESTS_EXTENDED=1`).
+
+### SSH keys and parameter overrides
+
+| Setting | Role |
+| --- | --- |
+| `rugix_ssh_private_key` | Project private key for VM login (copied to `.rugix-testkit/id_rsa`). If unset, a random key is generated there. |
+| `rugix_ssh_param_file` | When `true` (default), `bakery` authorizes that key's public half via `--param-file` (`core/ssh.root_authorized_keys`). Set `false` when the image already bakes the pubkey in a layer. |
+| `rugix_save_bake_log` | When `true`, write each bake's output under `test-outputs/bakery/<artifact>.log`. Default `false`. |
+| `bakery_with_overrides` | Request in tests that need a rebake with different recipe parameters (override `bakery_param_overrides`). |
+
+Custom layers that already set `root_authorized_keys` should point pytest at the
+matching private key and disable SSH param-file injection:
+
+```toml
+[tool.pytest.ini_options]
+rugix_ssh_private_key = "keys/id_rsa"
+rugix_ssh_param_file = false
+```
+
+```python
+@pytest.fixture
+def bakery_param_overrides():
+    return {"some/recipe": {"flag": True}}
+
+
+def test_rebake(bakery_with_overrides: BakeryBuilder) -> None:
+    image = bakery_with_overrides.bake_image("test-efi")
+    ...
+```
+
+Override bakes still write to `build/<system>/` and replace a default bake of
+the same system name; prefer a dedicated system or a module that only uses
+`bakery_with_overrides`.
 
 ### Baking and Parallel Runs
 
@@ -120,10 +169,9 @@ each image and bundle at most once per test run. The VMs of different workers
 run in parallel. Each VM uses 2 vCPUs and 2 GiB of memory, which determines how
 many workers a machine can sustain, for example, `pytest -n 4`.
 
-The plugin generates an SSH key in `.rugix-testkit/` and authorizes it with a
-parameter override of `core/ssh`. Because Bakery's layer cache keys include
-parameter overrides, changing the key or other overrides rebuilds the affected
-layers. Bakery does not track the content of mounted binaries, so delete the
+CLI `--param-file` overrides participate in Bakery layer cache keys for layers
+that use those recipes. Prefer fixed values in layer.toml when possible.
+Bakery does not track the content of mounted binaries, so delete the
 project's `.rugix` directory after rebuilding binaries that a cached layer
 installed.
 

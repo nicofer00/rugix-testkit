@@ -7,6 +7,9 @@ configuration::
     [tool.pytest.ini_options]
     rugix_project_dir = "."
     rugix_boot_system = "test-efi"
+    rugix_ssh_private_key = "keys/id_rsa"  # optional
+    rugix_ssh_param_file = true            # authorize SSH via --param-file
+    rugix_save_bake_log = false            # write bakery/<artifact>.log
 
 Tests use the ``vm`` fixture to boot ``rugix_boot_system`` and override the
 ``boot_system`` fixture to boot another system. The plugin works with
@@ -27,9 +30,9 @@ from threading import Thread
 
 import pytest
 
-from .bakery import BakeryBuilder, Parameters
+from .bakery import BakeryBuilder, Parameters, merge_parameters
 from .bundler import Bundler
-from .keys import ensure_ssh_key
+from .keys import ensure_ssh_key, install_ssh_key
 from .qemu.config import VMConfig
 from .qemu.efi import amd64_efi_config
 from .qemu.handle import VMHandle
@@ -61,10 +64,31 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "Heading of the test report in the GitHub Actions job summary",
         default="System Tests",
     )
+    parser.addini(
+        "rugix_ssh_private_key",
+        "SSH private key for VM login, relative to rugix_project. "
+        "If unset, a key is generated under .rugix-testkit/id_rsa.",
+        default="",
+    )
+    parser.addini(
+        "rugix_ssh_param_file",
+        "When true (default), the bakery fixture authorizes the SSH public key "
+        "via --param-file. Set false when the image already bakes "
+        "root_authorized_keys in a layer.",
+        type="bool",
+        default=True,
+    )
+    parser.addini(
+        "rugix_save_bake_log",
+        "When true, write each bake's stdout/stderr under "
+        "--test-outputs-dir/bakery/<artifact>.log",
+        type="bool",
+        default=False,
+    )
     parser.addoption(
         "--test-outputs-dir",
         default="test-outputs",
-        help="directory for serial logs and command histories of test VMs",
+        help="directory for VM serial/command logs and optional bakery bake logs",
     )
 
 
@@ -110,17 +134,78 @@ def rugix_project(pytestconfig: pytest.Config) -> Path:
 
 
 @pytest.fixture(scope="session")
-def ssh_key(rugix_project: Path) -> Path:
-    """Private key authorized for ``root`` on all baked systems."""
-    path = rugix_project / ".rugix-testkit" / "id_rsa"
-    ensure_ssh_key(path)
-    return path
+def ssh_key(pytestconfig: pytest.Config, rugix_project: Path) -> Path:
+    """Private key used to log in as ``root`` on baked systems.
+
+    Configured with ``rugix_ssh_private_key`` (copied to
+    ``.rugix-testkit/id_rsa``), or generated there when unset.
+    """
+    dest = rugix_project / ".rugix-testkit" / "id_rsa"
+    configured: str = pytestconfig.getini("rugix_ssh_private_key")
+    if configured:
+        source = (rugix_project / configured).resolve()
+        if not source.is_file():
+            pytest.fail(f"rugix_ssh_private_key not found: {source}")
+        install_ssh_key(source, dest)
+    else:
+        ensure_ssh_key(dest)
+    return dest
 
 
 @pytest.fixture(scope="session")
 def bakery_parameters() -> Parameters:
-    """Recipe parameter overrides for all bakes. Override to add parameters."""
+    """Recipe parameter overrides for the session ``bakery`` fixture.
+
+    Override to add suite-wide ``--param-file`` parameters. Empty by default.
+    """
     return {}
+
+
+@pytest.fixture
+def bakery_param_overrides() -> Parameters:
+    """Opt-in recipe parameter overrides for ``bakery_with_overrides``.
+
+    Override in a test module (or test) to rebake with different parameters.
+    Default is empty; tests that do not need overrides should use ``bakery``.
+    """
+    return {}
+
+
+def _bakery_run_dir(
+    pytestconfig: pytest.Config, tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    run_dir = tmp_path_factory.getbasetemp()
+    # pytest-xdist gives each worker a base temp directory below one shared by
+    # the whole run.
+    if hasattr(pytestconfig, "workerinput"):
+        run_dir = run_dir.parent
+    return run_dir
+
+
+def _bake_log_dir(pytestconfig: pytest.Config) -> Path | None:
+    if not pytestconfig.getini("rugix_save_bake_log"):
+        return None
+    return Path(pytestconfig.getoption("--test-outputs-dir")) / "bakery"
+
+
+def _ssh_public_key(ssh_key: Path) -> str:
+    return ssh_key.with_name(f"{ssh_key.name}.pub").read_text().strip()
+
+
+def _session_bakery_parameters(
+    *,
+    ssh_param_file: bool,
+    ssh_key: Path,
+    bakery_parameters: Parameters,
+) -> dict[str, dict[str, str | bool | int]] | None:
+    parameters = merge_parameters(bakery_parameters)
+    if ssh_param_file:
+        ssh_parameters: Mapping[str, str | bool | int] = {
+            **parameters.get("core/ssh", {}),
+            "root_authorized_keys": _ssh_public_key(ssh_key),
+        }
+        parameters = merge_parameters(parameters, {"core/ssh": dict(ssh_parameters)})
+    return parameters or None
 
 
 @pytest.fixture(scope="session")
@@ -131,18 +216,51 @@ def bakery(
     bakery_parameters: Parameters,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> BakeryBuilder:
-    """Bakes images and bundles of the project."""
-    run_dir = tmp_path_factory.getbasetemp()
-    # pytest-xdist gives each worker a base temp directory below one shared by
-    # the whole run.
-    if hasattr(pytestconfig, "workerinput"):
-        run_dir = run_dir.parent
-    ssh_parameters: Mapping[str, str | bool | int] = {
-        **bakery_parameters.get("core/ssh", {}),
-        "root_authorized_keys": ensure_ssh_key(ssh_key),
-    }
-    parameters = {**bakery_parameters, "core/ssh": ssh_parameters}
-    return BakeryBuilder(rugix_project, run_dir, parameters=parameters)
+    """Bakes images and bundles of the project.
+
+    When ``rugix_ssh_param_file`` is true (default), authorizes the SSH public
+    key via ``--param-file``. Set it false when the image already contains
+    ``root_authorized_keys`` from a layer. Suite-wide overrides come from
+    ``bakery_parameters``. For per-module rebakes, use ``bakery_with_overrides``.
+    """
+    ssh_param_file: bool = pytestconfig.getini("rugix_ssh_param_file")
+    parameters = _session_bakery_parameters(
+        ssh_param_file=ssh_param_file,
+        ssh_key=ssh_key,
+        bakery_parameters=bakery_parameters,
+    )
+    return BakeryBuilder(
+        rugix_project,
+        _bakery_run_dir(pytestconfig, tmp_path_factory),
+        parameters=parameters,
+        bake_log_dir=_bake_log_dir(pytestconfig),
+    )
+
+
+@pytest.fixture
+def bakery_with_overrides(
+    pytestconfig: pytest.Config,
+    rugix_project: Path,
+    bakery_parameters: Parameters,
+    bakery_param_overrides: Parameters,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> BakeryBuilder:
+    """Bakery builder with ``bakery_param_overrides`` (merged with session
+    ``bakery_parameters``).
+
+    Request this fixture in tests that need a rebake with different recipe
+    parameters. Does not auto-inject SSH; include ``core/ssh`` in the
+    overrides if needed. Overwrites ``build/<system>/`` for the same system
+    name as a default bake—prefer a dedicated system or a module that only
+    uses this fixture.
+    """
+    parameters = merge_parameters(bakery_parameters, bakery_param_overrides) or None
+    return BakeryBuilder(
+        rugix_project,
+        _bakery_run_dir(pytestconfig, tmp_path_factory),
+        parameters=parameters,
+        bake_log_dir=_bake_log_dir(pytestconfig),
+    )
 
 
 @pytest.fixture(scope="session")
@@ -259,10 +377,24 @@ def _save_vm_outputs(item: pytest.Item) -> None:
     test_dir.mkdir(parents=True, exist_ok=True)
     for index, handle in enumerate(handles):
         suffix = f"-{index}" if index else ""
-        (test_dir / f"serial{suffix}.log").write_text(handle.serial_output)
+        serial = handle.serial_output
+        serial_path = test_dir / f"serial{suffix}.log"
+        serial_path.write_text(serial)
+        logger.debug(
+            "saved %s (%d bytes):\n%s",
+            serial_path,
+            len(serial),
+            serial.rstrip("\n"),
+        )
         if isinstance(handle, VMHandle):
-            (test_dir / f"commands{suffix}.log").write_text(
-                "".join(f"{cmd}\n\n" for cmd in handle.command_history)
+            commands = "".join(f"{cmd}\n\n" for cmd in handle.command_history)
+            commands_path = test_dir / f"commands{suffix}.log"
+            commands_path.write_text(commands)
+            logger.debug(
+                "saved %s (%d bytes):\n%s",
+                commands_path,
+                len(commands),
+                commands.rstrip("\n"),
             )
 
 

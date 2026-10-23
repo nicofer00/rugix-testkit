@@ -1,3 +1,6 @@
 .*_cache
 .venv
 __pycache__
+test-outputs/
+build/
+.rugix-testkit/

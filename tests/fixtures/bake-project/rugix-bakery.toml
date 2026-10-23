@@ -1,0 +1,7 @@
+[repositories]
+rugix-testkit = { path = "repos/rugix-testkit" }
+
+[systems.test-efi]
+layer = "rugix-testkit/debian-efi"
+architecture = "amd64"
+target = "generic-grub-efi"
