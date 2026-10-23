@@ -63,6 +63,29 @@ def test_run_logged_strips_crlf(caplog: pytest.LogCaptureFixture) -> None:
     assert bakery_lines == ["bakery: one", "bakery: two"]
 
 
+def test_run_logged_progress_cr_and_ansi(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``\\r`` overwrites the current line; ANSI cursor controls are stripped."""
+    log = logging.getLogger("test_run_logged_progress")
+    code = (
+        "import sys\n"
+        "sys.stdout.write('keep\\n')\n"
+        "sys.stdout.write('\\rprogress 10%')\n"
+        "sys.stdout.write('\\rprogress 100%\\n')\n"
+        "sys.stdout.write('\\x1b[1A\\x1b[2Kfinal\\n')\n"
+    )
+    with caplog.at_level(logging.DEBUG, logger="test_run_logged_progress"):
+        run_logged(["python", "-c", code], logger=log, prefix="bakery: ")
+    bakery_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "test_run_logged_progress"
+    ]
+    assert bakery_lines == ["bakery: keep", "bakery: progress 100%", "bakery: final"]
+    assert all("\x1b" not in msg for msg in bakery_lines)
+
+
 def test_run_logged_streams_live_with_pty() -> None:
     """PTY forces line buffering so sleeps between prints are visible live."""
     log = logging.getLogger("test_run_logged_live")
