@@ -12,11 +12,11 @@ import json
 import logging
 import os
 import shutil
-import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from .locks import exclusive_lock
+from .process import run_logged
 
 logger = logging.getLogger(__name__)
 
@@ -65,15 +65,22 @@ class BakeryBuilder:
     """
 
     def __init__(
-        self, project_dir: Path, run_dir: Path, *, parameters: Parameters | None = None
+        self,
+        project_dir: Path,
+        run_dir: Path,
+        *,
+        parameters: Parameters | None = None,
+        bake_log_dir: Path | None = None,
     ) -> None:
         self.project_dir = project_dir.resolve()
         self.run_dir = run_dir
+        self.bake_log_dir = bake_log_dir
         self.parameters: dict[str, dict[str, str | bool | int]] = (
             dict(merge_parameters(parameters)) if parameters else {}
         )
         self._overrides_hash = parameters_hash(self.parameters or None)
         self._bake_args: list[str] = []
+        self._bake_log_file: Path | None = None
         if self.parameters:
             param_file = (
                 self.project_dir
@@ -125,7 +132,14 @@ class BakeryBuilder:
         logger.info("bakery: %s", " ".join(cmd))
         env = os.environ.copy()
         env.setdefault("RUGIX_DEV", "true")
-        subprocess.run(cmd, cwd=self.project_dir, check=True, env=env)
+        run_logged(
+            cmd,
+            cwd=self.project_dir,
+            env=env,
+            logger=logger,
+            prefix="bakery: ",
+            log_file=self._bake_log_file,
+        )
 
     def _bake_once(self, artifact: str, bake: Callable[[], None]) -> None:
         marker = self.run_dir / f"baked-{artifact}"
@@ -135,7 +149,15 @@ class BakeryBuilder:
             # Another worker may have baked the artifact while we waited.
             if marker.exists():
                 return
-            bake()
+            log_file: Path | None = None
+            if self.bake_log_dir is not None:
+                self.bake_log_dir.mkdir(parents=True, exist_ok=True)
+                log_file = self.bake_log_dir / f"{artifact}.log"
+            self._bake_log_file = log_file
+            try:
+                bake()
+            finally:
+                self._bake_log_file = None
             marker.touch()
 
 

@@ -9,6 +9,7 @@ configuration::
     rugix_boot_system = "test-efi"
     rugix_ssh_private_key = "keys/id_rsa"  # optional
     rugix_ssh_param_file = true            # authorize SSH via --param-file
+    rugix_save_bake_log = false            # write bakery/<artifact>.log
 
 Tests use the ``vm`` fixture to boot ``rugix_boot_system`` and override the
 ``boot_system`` fixture to boot another system. The plugin works with
@@ -77,10 +78,17 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         type="bool",
         default=True,
     )
+    parser.addini(
+        "rugix_save_bake_log",
+        "When true, write each bake's stdout/stderr under "
+        "--test-outputs-dir/bakery/<artifact>.log",
+        type="bool",
+        default=False,
+    )
     parser.addoption(
         "--test-outputs-dir",
         default="test-outputs",
-        help="directory for serial logs and command histories of test VMs",
+        help="directory for VM serial/command logs and optional bakery bake logs",
     )
 
 
@@ -174,6 +182,12 @@ def _bakery_run_dir(
     return run_dir
 
 
+def _bake_log_dir(pytestconfig: pytest.Config) -> Path | None:
+    if not pytestconfig.getini("rugix_save_bake_log"):
+        return None
+    return Path(pytestconfig.getoption("--test-outputs-dir")) / "bakery"
+
+
 def _ssh_public_key(ssh_key: Path) -> str:
     return ssh_key.with_name(f"{ssh_key.name}.pub").read_text().strip()
 
@@ -219,6 +233,7 @@ def bakery(
         rugix_project,
         _bakery_run_dir(pytestconfig, tmp_path_factory),
         parameters=parameters,
+        bake_log_dir=_bake_log_dir(pytestconfig),
     )
 
 
@@ -244,6 +259,7 @@ def bakery_with_overrides(
         rugix_project,
         _bakery_run_dir(pytestconfig, tmp_path_factory),
         parameters=parameters,
+        bake_log_dir=_bake_log_dir(pytestconfig),
     )
 
 
@@ -361,10 +377,24 @@ def _save_vm_outputs(item: pytest.Item) -> None:
     test_dir.mkdir(parents=True, exist_ok=True)
     for index, handle in enumerate(handles):
         suffix = f"-{index}" if index else ""
-        (test_dir / f"serial{suffix}.log").write_text(handle.serial_output)
+        serial = handle.serial_output
+        serial_path = test_dir / f"serial{suffix}.log"
+        serial_path.write_text(serial)
+        logger.debug(
+            "saved %s (%d bytes):\n%s",
+            serial_path,
+            len(serial),
+            serial.rstrip("\n"),
+        )
         if isinstance(handle, VMHandle):
-            (test_dir / f"commands{suffix}.log").write_text(
-                "".join(f"{cmd}\n\n" for cmd in handle.command_history)
+            commands = "".join(f"{cmd}\n\n" for cmd in handle.command_history)
+            commands_path = test_dir / f"commands{suffix}.log"
+            commands_path.write_text(commands)
+            logger.debug(
+                "saved %s (%d bytes):\n%s",
+                commands_path,
+                len(commands),
+                commands.rstrip("\n"),
             )
 
 

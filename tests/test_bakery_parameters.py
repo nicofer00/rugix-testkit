@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
 from rugix_testkit.bakery import (
@@ -9,7 +10,7 @@ from rugix_testkit.bakery import (
     merge_parameters,
     parameters_hash,
 )
-from rugix_testkit.pytest_plugin import _session_bakery_parameters
+from rugix_testkit.pytest_plugin import _bake_log_dir, _session_bakery_parameters
 
 
 def test_merge_parameters_later_wins() -> None:
@@ -75,3 +76,48 @@ def test_bakery_builder_uses_hashed_param_file(tmp_path: Path) -> None:
     assert "image-sys-" + parameters_hash(parameters) == (
         f"image-sys-{builder._overrides_hash}"
     )
+
+
+def _fake_bakery_project(tmp_path: Path, system: str = "sys") -> Path:
+    project = tmp_path / "project"
+    project.mkdir()
+    run_bakery = project / "run-bakery"
+    run_bakery.write_text("#!/bin/sh\nprintf 'bake-ok\\n'\n")
+    run_bakery.chmod(run_bakery.stat().st_mode | stat.S_IEXEC)
+    build = project / "build" / system
+    build.mkdir(parents=True)
+    (build / "system.img").write_bytes(b"img")
+    return project
+
+
+def test_bake_image_writes_artifact_log(tmp_path: Path) -> None:
+    project = _fake_bakery_project(tmp_path)
+    log_dir = tmp_path / "bakery-logs"
+    builder = BakeryBuilder(project, tmp_path / "run", bake_log_dir=log_dir)
+    builder.bake_image("sys")
+    log_path = log_dir / f"image-sys-{builder._overrides_hash}.log"
+    assert log_path.read_text() == "bake-ok\n"
+
+
+def test_bake_image_skips_log_without_dir(tmp_path: Path) -> None:
+    project = _fake_bakery_project(tmp_path)
+    builder = BakeryBuilder(project, tmp_path / "run")
+    builder.bake_image("sys")
+    assert not (tmp_path / "bakery-logs").exists()
+
+
+def test_bake_log_dir_respects_ini(tmp_path: Path) -> None:
+    class Config:
+        def __init__(self, enabled: bool) -> None:
+            self._enabled = enabled
+
+        def getini(self, name: str) -> bool:
+            assert name == "rugix_save_bake_log"
+            return self._enabled
+
+        def getoption(self, name: str) -> str:
+            assert name == "--test-outputs-dir"
+            return str(tmp_path / "outputs")
+
+    assert _bake_log_dir(Config(False)) is None  # type: ignore[arg-type]
+    assert _bake_log_dir(Config(True)) == tmp_path / "outputs" / "bakery"  # type: ignore[arg-type]

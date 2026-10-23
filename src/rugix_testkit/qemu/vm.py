@@ -38,6 +38,7 @@ class QemuVM:
         self._work_dir = work_dir or Path(tempfile.mkdtemp(prefix="rugix-vm-"))
         self._process: subprocess.Popen[bytes] | None = None
         self._serial_log: list[str] = []
+        self._serial_line_buf = ""
         self._serial_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
@@ -137,6 +138,7 @@ class QemuVM:
 
         self._stop_event.clear()
         self._serial_log.clear()
+        self._serial_line_buf = ""
         self._process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -246,9 +248,23 @@ class QemuVM:
                     break
                 decoded = chunk.decode("utf-8", errors="replace")
                 self._serial_log.append(decoded)
-                logger.debug("serial: %r", decoded)
+                self._log_serial_lines(decoded)
         except (ValueError, OSError):
             pass
+        if self._serial_line_buf:
+            logger.debug("serial: %s", self._serial_line_buf)
+            self._serial_line_buf = ""
+
+    def _log_serial_lines(self, chunk: str) -> None:
+        pending = self._serial_line_buf + chunk
+        while True:
+            newline = pending.find("\n")
+            if newline < 0:
+                break
+            line = pending[:newline].rstrip("\r")
+            pending = pending[newline + 1 :]
+            logger.debug("serial: %s", line)
+        self._serial_line_buf = pending
 
 
 _ARCH_TO_HOST = {"x86_64": "x86_64", "aarch64": "aarch64"}

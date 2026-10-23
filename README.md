@@ -118,12 +118,18 @@ Tests marked with `@pytest.mark.extended` only run when `RUGIX_TESTS_EXTENDED`
 is set. After each test, the plugin saves the serial output and command
 history of its VMs to `test-outputs/`.
 
+Use `--log-cli-level=DEBUG` to stream bakery stdout/stderr and VM serial
+output to the terminal while tests run. With `rugix_save_bake_log = true`,
+each bake also writes `test-outputs/bakery/<artifact>.log` (named from the
+bake artifact key, for example `image-test-efi-<hash>.log`).
+
 ### SSH keys and parameter overrides
 
 | Setting | Role |
 | --- | --- |
 | `rugix_ssh_private_key` | Project private key for VM login (copied to `.rugix-testkit/id_rsa`). If unset, a random key is generated there. |
 | `rugix_ssh_param_file` | When `true` (default), `bakery` authorizes that key's public half via `--param-file` (`core/ssh.root_authorized_keys`). Set `false` when the image already bakes the pubkey in a layer. |
+| `rugix_save_bake_log` | When `true`, write each bake's output under `test-outputs/bakery/<artifact>.log`. Default `false`. |
 | `bakery_with_overrides` | Request in tests that need a rebake with different recipe parameters (override `bakery_param_overrides`). |
 
 Custom layers that already set `root_authorized_keys` should point pytest at the
