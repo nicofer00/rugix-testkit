@@ -54,7 +54,6 @@ def test_run_logged_strips_crlf(caplog: pytest.LogCaptureFixture) -> None:
             logger=log,
             prefix="bakery: ",
         )
-    # No blank DEBUG lines between the two bakery lines.
     bakery_lines = [
         record.getMessage()
         for record in caplog.records
@@ -63,10 +62,10 @@ def test_run_logged_strips_crlf(caplog: pytest.LogCaptureFixture) -> None:
     assert bakery_lines == ["bakery: one", "bakery: two"]
 
 
-def test_run_logged_progress_cr_and_ansi(
+def test_run_logged_replaces_in_place_updates(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``\\r`` overwrites the current line; ANSI cursor controls are stripped."""
+    """CR progress and cursor-up redraws replace lines instead of duplicating."""
     log = logging.getLogger("test_run_logged_progress")
     code = (
         "import sys\n"
@@ -82,19 +81,45 @@ def test_run_logged_progress_cr_and_ansi(
         for record in caplog.records
         if record.name == "test_run_logged_progress"
     ]
-    assert bakery_lines == ["bakery: keep", "bakery: progress 100%", "bakery: final"]
+    assert bakery_lines == ["bakery: keep", "bakery: final"]
     assert all("\x1b" not in msg for msg in bakery_lines)
 
 
+def test_run_logged_layer_style_redraw(caplog: pytest.LogCaptureFixture) -> None:
+    """A multi-line status block rewritten with cursor-up logs once."""
+    log = logging.getLogger("test_run_logged_layer")
+    code = (
+        "import sys\n"
+        "sys.stdout.write('------- Layer: current-layer -------\\n')\n"
+        "sys.stdout.write('running step 1\\n')\n"
+        "sys.stdout.write('\\x1b[2A\\x1b[2K------- Layer: current-layer -------\\n')\n"
+        "sys.stdout.write('\\x1b[2Krunning step 2\\n')\n"
+        "sys.stdout.write('\\x1b[2A\\x1b[2K------- Layer: current-layer -------\\n')\n"
+        "sys.stdout.write('\\x1b[2Kdone\\n')\n"
+    )
+    with caplog.at_level(logging.DEBUG, logger="test_run_logged_layer"):
+        run_logged(["python", "-c", code], logger=log, prefix="bakery: ")
+    bakery_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "test_run_logged_layer"
+    ]
+    assert bakery_lines == [
+        "bakery: ------- Layer: current-layer -------",
+        "bakery: done",
+    ]
+
+
 def test_run_logged_streams_live_with_pty() -> None:
-    """PTY forces line buffering so sleeps between prints are visible live."""
+    """PTY + soft-tail of one still streams earlier lines before later ones."""
     log = logging.getLogger("test_run_logged_live")
-    seen: list[float] = []
+    seen: list[tuple[float, str]] = []
 
     class Handler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
-            if record.getMessage().startswith("bakery: "):
-                seen.append(time.monotonic())
+            msg = record.getMessage()
+            if msg.startswith("bakery: "):
+                seen.append((time.monotonic(), msg))
 
     handler = Handler()
     log.addHandler(handler)
@@ -107,7 +132,9 @@ def test_run_logged_streams_live_with_pty() -> None:
                 "import time\n"
                 "print('a', flush=False)\n"
                 "time.sleep(0.4)\n"
-                "print('b', flush=False)\n",
+                "print('b', flush=False)\n"
+                "time.sleep(0.4)\n"
+                "print('c', flush=False)\n",
             ],
             logger=log,
             prefix="bakery: ",
@@ -115,5 +142,6 @@ def test_run_logged_streams_live_with_pty() -> None:
     finally:
         log.removeHandler(handler)
 
-    assert len(seen) == 2
-    assert seen[1] - seen[0] >= 0.25
+    assert [msg for _, msg in seen] == ["bakery: a", "bakery: b", "bakery: c"]
+    # soft-tail=1 emits "a" when "b" arrives (after the first sleep).
+    assert seen[1][0] - seen[0][0] >= 0.25
